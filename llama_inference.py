@@ -20,8 +20,8 @@ def get_llama(model):
     model.seqlen = 2048
     return model
 
-def load_quant(model, checkpoint, wbits, groupsize = -1, fused_mlp = True, eval=True, warmup_autotune = True):
-    from transformers import LlamaConfig, LlamaForCausalLM 
+def load_quant(model, checkpoint, wbits, groupsize = -1, eval=True, warmup_autotune = True):
+    from transformers import LlamaConfig, LlamaForCausalLM, modeling_utils
     config = LlamaConfig.from_pretrained(model)
     def noop(*args, **kwargs):
         pass
@@ -30,7 +30,7 @@ def load_quant(model, checkpoint, wbits, groupsize = -1, fused_mlp = True, eval=
     torch.nn.init.normal_ = noop 
 
     torch.set_default_dtype(torch.half)
-    transformers.modeling_utils._init_weights = False
+    modeling_utils._init_weights = False
     torch.set_default_dtype(torch.half)
     model = LlamaForCausalLM(config)
     torch.set_default_dtype(torch.float)
@@ -51,14 +51,8 @@ def load_quant(model, checkpoint, wbits, groupsize = -1, fused_mlp = True, eval=
     else:
         model.load_state_dict(torch.load(checkpoint), strict = False)
         
-    quant.make_quant_attn(model)
-    if eval and fused_mlp:
-        quant.make_fused_mlp(model)
-        
     if warmup_autotune:
         quant.autotune_warmup_linear(model,transpose=not(eval))
-        if eval and fused_mlp:
-            quant.autotune_warmup_fused(model)
     model.seqlen = 2048
     print('Done.')
 
