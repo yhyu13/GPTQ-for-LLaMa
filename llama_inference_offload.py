@@ -191,7 +191,7 @@ class Offload_LlamaModel(LlamaModel):
             attentions=all_self_attns,
         )
 
-def load_quant(model, checkpoint, wbits, groupsize, pre_layer, fused_mlp = True, warmup_autotune=True):
+def load_quant(model, checkpoint, wbits, groupsize, pre_layer, warmup_autotune=True):
     transformers.models.llama.modeling_llama.LlamaModel = Offload_LlamaModel
     from transformers import LlamaConfig, LlamaForCausalLM 
     config = LlamaConfig.from_pretrained(model)
@@ -216,15 +216,9 @@ def load_quant(model, checkpoint, wbits, groupsize, pre_layer, fused_mlp = True,
     print('Loading model ...')
     load_checkpoint_in_model(model, checkpoint, dtype='float16')
     model.seqlen = 2048
-    
-    quant.make_quant_attn(model)
-    if fused_mlp:
-        quant.make_fused_mlp(model)
         
     if warmup_autotune:
         quant.autotune_warmup_linear(model)
-        if fused_mlp:
-            quant.autotune_warmup_fused(model)
 
     for i in range(pre_layer):
         model.model.layers[i].to(DEV)
