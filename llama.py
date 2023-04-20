@@ -275,7 +275,7 @@ def llama_pack(model, quantizers, wbits, groupsize):
     print('Done.')
     return model
 
-def load_quant(model, checkpoint, wbits, groupsize = -1, fused_mlp = True, eval=True, warmup_autotune = True):
+def load_quant(model, checkpoint, wbits, groupsize = -1, eval=True, warmup_autotune = True):
     from transformers import LlamaConfig, LlamaForCausalLM, modeling_utils
     config = LlamaConfig.from_pretrained(model)
     def noop(*args, **kwargs):
@@ -306,14 +306,8 @@ def load_quant(model, checkpoint, wbits, groupsize = -1, fused_mlp = True, eval=
     else:
         model.load_state_dict(torch.load(checkpoint), strict = False)
         
-    quant.make_quant_attn(model)
-    if eval and fused_mlp:
-        quant.make_fused_mlp(model)
-        
     if warmup_autotune:
         quant.autotune_warmup_linear(model,transpose=not(eval))
-        if eval and fused_mlp:
-            quant.autotune_warmup_fused(model)
     model.seqlen = 2048
     print('Done.')
 
