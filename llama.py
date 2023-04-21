@@ -1,10 +1,11 @@
 import argparse
 import time
+import os
+import json
 import numpy as np
 import torch
 import torch.nn as nn
 import quant
-
 from gptq import GPTQ, Observer
 from utils import find_layers, DEV, set_seed, get_wikitext2, get_ptb, get_c4, get_ptb_new, get_c4_new, get_loaders, export_quant_table, gen_conditions
 from texttable import Texttable
@@ -68,7 +69,8 @@ def llama_sequential(model, dataloader, dev):
     print('Ready.')
 
     quantizers = {}
-    observer = Observer()
+    layers_attr = {}
+    observer = Observer(topk=args.observe_topk)
     for i in range(len(layers)):
 
         print(f'Quantizing layer {i+1}/{len(layers)}..')
@@ -111,8 +113,8 @@ def llama_sequential(model, dataloader, dev):
 
             for name in subset:
                 scale,zero,g_idx,error = gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, name=name)
-                quantizers['model.layers.%d.%s' % (i, name)] = (gptq[name].quantizer.cpu(),scale.cpu(),zero.cpu(),g_idx.cpu(), args.wbits, args.groupsize)
-
+                quantizers['model.layers.%d.%s' % (i, name)] = (gptq[name].quantizer.cpu(),scale.cpu(),zero.cpu(),g_idx.cpu())
+                layers_attr['model.layers.%d.%s' % (i, name)] = {'bits': args.wbits,'groupsize': args.groupsize}
                 if args.observe:
                     observer.submit(name=name, layerid=i, gptq=gptq[name], error=error)
                 else:
@@ -138,7 +140,7 @@ def llama_sequential(model, dataloader, dev):
             layerid = item[1]
             gptq = item[2]['gptq']
             error = item[2]['error']
-            target = error / 2
+            target = error * args.error_target
             
             table = Texttable()
             table.header(['wbits', 'groupsize', 'error'])
@@ -157,8 +159,8 @@ def llama_sequential(model, dataloader, dev):
                 scale,zero,g_idx,error = gptq.fasterquant(percdamp=args.percdamp, groupsize=groupsize, actorder=args.act_order, name=name)
 
                 table.add_row([wbits, groupsize, error])
-                quantizers['model.layers.%d.%s' % (layerid, name)] = (gptq.quantizer.cpu(),scale.cpu(),zero.cpu(),g_idx.cpu(), wbits, groupsize)
-                
+                quantizers['model.layers.%d.%s' % (i, name)] = (gptq.quantizer.cpu(),scale.cpu(),zero.cpu(),g_idx.cpu())
+                layers_attr['model.layers.%d.%s' % (i, name)] = {'bits': wbits, 'groupsize': groupsize}
             print(table.draw())
             print('\n')
             gptq.layer.to('cpu')
@@ -166,7 +168,7 @@ def llama_sequential(model, dataloader, dev):
 
     model.config.use_cache = use_cache
     
-    return quantizers
+    return quantizers, layers_attr
 
 @torch.no_grad()
 def llama_eval(model, testenc, dev):
@@ -262,15 +264,15 @@ def llama_eval(model, testenc, dev):
     model.config.use_cache = use_cache
 
 # TODO: perform packing on GPU
-def llama_pack(model, quantizers, wbits, groupsize):
+def llama_pack(model, quantizers, wbits, groupsize, layers_attr=None):
     layers = find_layers(model)
     layers = {n: layers[n] for n in quantizers}
-    quant.make_quant_linear(model, quantizers, wbits, groupsize)
+    quant.make_quant_linear(model, quantizers, wbits, groupsize, layers_attr)
     qlayers = find_layers(model, [quant.QuantLinear])
     print('Packing ...')
     for name in qlayers:
         print(name)
-        quantizers[name],scale,zero,g_idx,_,_ = quantizers[name]
+        quantizers[name],scale,zero,g_idx = quantizers[name]
         qlayers[name].pack(layers[name], scale, zero, g_idx)
     print('Done.')
     return model
@@ -295,7 +297,14 @@ def load_quant(model, checkpoint, wbits, groupsize = -1, eval=True, warmup_autot
     for name in ['lm_head']:
         if name in layers:
             del layers[name]
-    quant.make_quant_linear(model, layers, wbits, groupsize)
+            
+    if os.path.isfile(checkpoint + '.json'):
+        with open(checkpoint + '.json', "r") as f:
+            layers_attr = json.load(f)
+    else:
+        layers_attr = None
+    
+    quant.make_quant_linear(model, layers, wbits, groupsize, layers_attr)
 
     del layers
     
@@ -484,6 +493,14 @@ if __name__ == '__main__':
         '--quant-directory', type=str, default=None,
         help='Specify the directory for export quantization parameters to toml format. `None` means no export by default.'
     )
+    parser.add_argument(
+        '--error_target', type=float, default=0.5,
+        help='Auto upgrade loss target'
+    )
+    parser.add_argument(
+        '--observe_topk', type=int, default=32,
+        help='Auto upgrade num layer'
+    )
     
     args = parser.parse_args()
 
@@ -502,7 +519,7 @@ if __name__ == '__main__':
 
     if not args.load and args.wbits < 16 and not args.nearest:
         tick = time.time()
-        quantizers = llama_sequential(model, dataloader, DEV)
+        quantizers, layers_attr = llama_sequential(model, dataloader, DEV)
         print(time.time() - tick)
         
     if args.benchmark:
@@ -529,13 +546,17 @@ if __name__ == '__main__':
     if args.quant_directory is not None:
         export_quant_table(quantizers, args.quant_directory)
 
-    if not args.observe and args.save:
-        llama_pack(model, quantizers, args.wbits, args.groupsize)
+    if args.save:
+        llama_pack(model, quantizers, args.wbits, args.groupsize, layers_attr)
         torch.save(model.state_dict(), args.save) 
-
-    if not args.observe and args.save_safetensors:
-        llama_pack(model, quantizers, args.wbits, args.groupsize)
+        with open(args.save + '.json', "w") as json_file:
+            json.dump(layers_attr, json_file)
+            
+    if args.save_safetensors:
+        llama_pack(model, quantizers, args.wbits, args.groupsize, layers_attr)
         from safetensors.torch import save_file as safe_save
         state_dict = model.state_dict()
         state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
         safe_save(state_dict, args.save_safetensors)
+        with open(args.save + '.json', "w") as json_file:
+            json.dump(layers_attr, json_file)
