@@ -6,9 +6,8 @@ from gptq import GPTQ
 import argparse
 from utils import find_layers, DEV, set_seed, get_wikitext2, get_ptb, get_c4, get_ptb_new, get_c4_new, get_loaders
 import quant 
-
-import transformers
 from transformers import AutoTokenizer
+
 from transformers.models.llama.modeling_llama import LlamaModel,LlamaConfig
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from typing import List, Optional, Tuple, Union
@@ -192,7 +191,7 @@ class Offload_LlamaModel(LlamaModel):
             attentions=all_self_attns,
         )
 
-def load_quant(model, checkpoint, wbits, groupsize, pre_layer, warmup_autotune=True):
+def load_quant(model, checkpoint, wbits, groupsize, pre_layer, eval=True, warmup_autotune = True):
     transformers.models.llama.modeling_llama.LlamaModel = Offload_LlamaModel
     from transformers import LlamaConfig, LlamaForCausalLM 
     config = LlamaConfig.from_pretrained(model)
@@ -212,14 +211,20 @@ def load_quant(model, checkpoint, wbits, groupsize, pre_layer, warmup_autotune=T
     for name in ['lm_head']:
         if name in layers:
             del layers[name]
-    quant.make_quant_linear(model, layers, wbits, groupsize)
+    if os.path.isfile(checkpoint + '.json'):
+        with open(checkpoint + '.json', "r") as f:
+            layers_attr = json.load(f)
+    else:
+        layers_attr = None
+    
+    quant.make_quant_linear(model, layers, wbits, groupsize, layers_attr)
 
     print('Loading model ...')
     load_checkpoint_in_model(model, checkpoint, dtype='float16')
     model.seqlen = 2048
         
     if warmup_autotune:
-        quant.autotune_warmup_linear(model)
+        quant.autotune_warmup_linear(model,transpose=not(eval))
 
     for i in range(pre_layer):
         model.model.layers[i].to(DEV)
