@@ -1,5 +1,6 @@
 import argparse
-
+import os
+import json
 import torch
 import torch.nn as nn
 import quant 
@@ -40,7 +41,14 @@ def load_quant(model, checkpoint, wbits, groupsize = -1, eval=True, warmup_autot
     for name in ['lm_head']:
         if name in layers:
             del layers[name]
-    quant.make_quant_linear(model, layers, wbits, groupsize)
+            
+    if os.path.isfile(checkpoint + '.json'):
+        with open(checkpoint + '.json', "r") as f:
+            layers_attr = json.load(f)
+    else:
+        layers_attr = None
+    
+    quant.make_quant_linear(model, layers, wbits, groupsize, layers_attr)
 
     del layers
     
