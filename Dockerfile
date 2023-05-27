@@ -10,7 +10,7 @@ RUN apt-get update && \
     apt-get install --no-install-recommends -y git vim build-essential python3-dev python3-venv && \
     rm -rf /var/lib/apt/lists/*
 
-RUN git clone --branch cuda_dev https://github.com/yhyu13/GPTQ-for-LLaMa /build
+RUN git clone --branch cuda_ooba https://github.com/yhyu13/GPTQ-for-LLaMa /build
 
 WORKDIR /build
 
